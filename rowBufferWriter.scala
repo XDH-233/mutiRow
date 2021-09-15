@@ -13,7 +13,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
         val transferStart = in Bool()
         val transferEnd   = out Bool()
         val dataOut       = out Bits (Hout * width bits)
-        val en            = out Bool()
+        val wrEn = out Bool()
         val address       = out UInt (log2Up(channel) bits)
     }
     noIoPrefix()
@@ -24,7 +24,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
     val lineBufferRowCounter = Reg(UInt(log2Up(channel) bits)) init (0)
     io.dataOut := 0
     io.dataIn.ready := True
-    io.en := False
+    io.wrEn := False
     io.transferEnd := False
     io.address := 0
 
@@ -70,7 +70,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
 
         rowsSending.whenIsActive {
             io.dataIn.ready := False
-            io.en := True
+            io.wrEn := True
             io.address := lineBufferRowCounter
 
             switch(rowCounter) {

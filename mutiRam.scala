@@ -8,11 +8,11 @@ import spinal.lib._
 
 case class mutiRam(width: Int, num: Int, depth: Int, inLineNum: Int) extends Component {
     val io = new Bundle {
-        val rdEn    = Vec(in Bool(), inLineNum)
-        val data    = Vec(in Bits (width bits), inLineNum)
-        val address = Vec(in UInt (log2Up(depth) bits), inLineNum)
+        val wrEn = in Bool()
+        val data = in Vec(Bits (width bits), inLineNum)
+        val address = in UInt (log2Up(depth) bits)
         val sync    = in Bool()
-        val dataOut = Vec(out Bits (width bits), inLineNum)
+        val dataOut = out Vec(Bits (width bits), inLineNum)
     }
     noIoPrefix()
 
@@ -33,10 +33,10 @@ case class mutiRam(width: Int, num: Int, depth: Int, inLineNum: Int) extends Com
         for (n <- 0 until num) {
             is(n) {
                 for (i <- 0 until inLineNum) {
-                    when(io.rdEn(i)) {
-                        io.dataOut(i) := Rams(n * inLineNum + i).readAsync(address = io.address(i))
+                    when(io.wrEn) {
+                        io.dataOut(i) := Rams(n * inLineNum + i).readAsync(address = io.address)
                     } otherwise {
-                        Rams(n * inLineNum + i).write(address = io.address(i), data = io.data(i))
+                        Rams(n * inLineNum + i).write(address = io.address, data = io.data(i))
                     }
                 }
             }
@@ -64,23 +64,15 @@ object doubleRamSim extends App {
             clockDomain.waitSampling()
 
             for (j <- 0 until dut.depth) {
-                //                io.rdEn(0) #= false
-                //                io.rdEn(1) #= false
-                io.rdEn.foreach(_ #= false)
+                io.wrEn #= false
                 io.data.randomize()
-                io.address.foreach(_ #= j)
-                //                io.address(0) #= j
-                //                io.address(1) #= j
+                io.address #= j
                 clockDomain.waitSampling()
                 for (k <- i * inLineNum until (i + 1) * inLineNum) {
                     dataRam(k)(j) = io.data(k % inLineNum).toBigInt
                 }
-                //                dataRam(i * 2)(j) = io.data(0).toBigInt
-                //                dataRam(i * 2 + 1)(j) = io.data(1).toBigInt
             }
-            io.rdEn.foreach(_ #= true)
-            //            io.rdEn(0) #= true
-            //            io.rdEn(1) #= true
+            io.wrEn #= true
             io.sync #= true
             clockDomain.waitSampling()
         }
@@ -89,17 +81,17 @@ object doubleRamSim extends App {
         for (i <- 0 until 50) {
             io.sync.randomize()
             io.address.randomize()
-            io.rdEn.randomize()
+            io.wrEn.randomize()
             io.data.randomize()
             clockDomain.waitSampling()
             println("--------------------")
             println("i: " + i)
             for (j <- 0 until inLineNum) {
-                if (!io.rdEn(j).toBoolean) { // write
-                    dataRam(counter.toInt * inLineNum + j)(io.address(j).toInt) = io.data(j).toBigInt
-                    println(s"write ram ${counter.toInt * inLineNum + j} with data: ${io.data(j).toBigInt} in address: ${io.address(j).toBigInt}")
+                if (!io.wrEn.toBoolean) { // write
+                    dataRam(counter.toInt * inLineNum + j)(io.address.toInt) = io.data(j).toBigInt
+                    println(s"write ram ${counter.toInt * inLineNum + j} with data: ${io.data(j).toBigInt} in address: ${io.address.toBigInt}")
                 } else { // read
-                    val gold = dataRam(counter.toInt * inLineNum + j)(io.address(j).toInt)
+                    val gold = dataRam(counter.toInt * inLineNum + j)(io.address.toInt)
                     val get  = io.dataOut(j).toBigInt
                     println(s"read ram ${counter.toInt * inLineNum + j}, readData: ${get}")
                     println(s"expected: ${gold}")
