@@ -10,11 +10,7 @@ import spinal.lib.fsm._
 case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int) extends Component {
     val io = new Bundle {
         val dataIn        = slave Stream (Vec(Bits(width bits), Iw * Wh))
-        val transferStart = in Bool()
-        val transferEnd   = out Bool()
-        val dataOut       = out Bits (Hout * width bits)
-        val wrEn = out Bool()
-        val address       = out UInt (log2Up(channel) bits)
+        val toControl     = master(rowBufferWriterPorts(Hout = Hout, dataWidth = width, channel = channel))
     }
     noIoPrefix()
 
@@ -22,11 +18,11 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
     val colCounter           = Reg(UInt(log2Up(colCount) + 1 bits)) init (0)
     val rowCounter           = Reg(UInt(log2Up(Wh) + 1 bits)) init (0)
     val lineBufferRowCounter = Reg(UInt(log2Up(channel) bits)) init (0)
-    io.dataOut := 0
+    io.toControl.dataToRam := 0
     io.dataIn.ready := True
-    io.wrEn := False
-    io.transferEnd := False
-    io.address := 0
+    io.toControl.wrEn := False
+    io.toControl.transferEnd := False
+    io.toControl.address := 0
 
     val FSM = new StateMachine {
         val idle            = new State with EntryPoint
@@ -35,7 +31,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
         val transferEnd     = new State
 
         idle.whenIsActive {
-            when(io.transferStart) {
+            when(io.toControl.transferStart) {
                 goto(blocksReceiving)
             } otherwise {
                 goto(idle)
@@ -70,14 +66,14 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
 
         rowsSending.whenIsActive {
             io.dataIn.ready := False
-            io.wrEn := True
-            io.address := lineBufferRowCounter
+            io.toControl.wrEn := True
+            io.toControl.address := lineBufferRowCounter
 
             switch(rowCounter) {
                 for (r <- 0 until Wh) {
                     is(r) {
                         blockRegs(r).zipWithIndex.foreach { case (reg, index) =>
-                            io.dataOut((index + 1) * width - 1 downto index * width) := reg
+                            io.toControl.dataToRam((index + 1) * width - 1 downto index * width) := reg
                         }
                     }
                 }
@@ -99,7 +95,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
         }
 
         transferEnd.whenIsActive {
-            io.transferEnd := True
+            io.toControl.transferEnd := True
             io.dataIn.ready := False
             goto(idle)
         }
@@ -125,16 +121,16 @@ object rowBufferWriterSim extends App {
     implicit class simMethod(dut: rowBufferWriter) {
         def init = {
             dut.io.dataIn.valid #= false
-            dut.io.transferStart #= false
+            dut.io.toControl.transferStart #= false
             dut.io.dataIn.payload.foreach(_ #= 0)
             dut.clockDomain.waitSampling()
         }
 
         def writeBuffer(buffer: List[List[BigInt]]) = {
-            dut.io.transferStart #= true
+            dut.io.toControl.transferStart #= true
             dut.io.dataIn.valid #= false
             dut.clockDomain.waitSampling()
-            dut.io.transferStart #= false
+            dut.io.toControl.transferStart #= false
             for (c <- 0 until dut.rowCount) {
                 dut.io.dataIn.valid #= true
                 for (t <- 0 until dut.colCount) {
@@ -148,7 +144,7 @@ object rowBufferWriterSim extends App {
                     if (c * dut.Wh + o < dut.channel) {
                         dut.clockDomain.waitSampling()
                         if (o == 0) printRegs
-                        var resString = dut.io.dataOut.toBigInt.toString(2)
+                        var resString = dut.io.toControl.dataToRam.toBigInt.toString(2)
                         if (resString.length < dut.width * dut.Hout)
                             resString = ("0" * (dut.Hout * dut.width - resString.length)) + resString
                         resString.grouped(dut.width).map(s => BigInt(s, 2)).foreach(n => printf("%6d ", n))
