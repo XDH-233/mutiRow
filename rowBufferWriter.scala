@@ -19,7 +19,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
     val rowCounter           = Reg(UInt(log2Up(Wh) + 1 bits)) init (0)
     val lineBufferRowCounter = Reg(UInt(log2Up(channel) bits)) init (0)
     io.toControl.dataToRam := 0
-    io.dataIn.ready := True
+    io.dataIn.ready := False
     io.toControl.wrEn := False
     io.toControl.transferEnd := False
     io.toControl.address := 0
@@ -31,6 +31,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
         val transferEnd     = new State
 
         idle.whenIsActive {
+            io.dataIn.ready := False
             when(io.toControl.transferStart) {
                 goto(blocksReceiving)
             } otherwise {
@@ -40,6 +41,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
 
 
         blocksReceiving.whenIsActive {
+            io.dataIn.ready := True
             when(io.dataIn.valid) {
                 for (w <- 0 until Wh) {
                     for (i <- 0 until Iw) {
