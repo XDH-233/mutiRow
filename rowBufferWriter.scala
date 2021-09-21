@@ -107,9 +107,9 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
 }
 
 object lineBuffer {
-    def getLineBuffer(rowNum: Int, colNum: Int, channel: Int, Hout: Int, width: Int) = List.tabulate(rowNum, colNum)((i, j) => if (i > channel - 1 || j > Hout - 1) BigInt(0) else BigInt(width, scala.util.Random))
-
-    def print2D(buffer: List[List[BigInt]]) = {
+    def getRowMatrix(rowNumOfBlocks: Int, colNumOfBlocks: Int, channel: Int, Hout: Int, width: Int) = List.tabulate(rowNumOfBlocks, colNumOfBlocks)((i, j) => if (i > channel - 1 || j > Hout - 1) BigInt(0) else BigInt(width, scala.util.Random)).map(_.toArray).toArray
+    def getRows(rowNumOfBlocks: Int, colNumOfBlocks: Int, channel: Int, Hout: Int, width: Int, rowNum: Int): Array[Array[Array[BigInt]]] =Array.fill(rowNum)(getRowMatrix(rowNumOfBlocks, colNumOfBlocks, channel, Hout, width))
+    def print2D(buffer: Array[Array[BigInt]]) = {
         buffer.foreach { seq =>
             seq.foreach(b => printf("%6d ", b))
             println("")
@@ -128,7 +128,7 @@ object rowBufferWriterSim extends App {
             dut.clockDomain.waitSampling()
         }
 
-        def writeBuffer(buffer: List[List[BigInt]]) = {
+        def writeBuffer(buffer: Array[Array[BigInt]]) = {
             dut.io.toControl.transferStart #= true
             dut.io.dataIn.valid #= false
             dut.clockDomain.waitSampling()
@@ -158,11 +158,11 @@ object rowBufferWriterSim extends App {
             }
         }
 
-        def getRegs: Array[IndexedSeq[BigInt]] = dut.blockRegs.map(_.map(_.toBigInt))
+        def getRegs= dut.blockRegs.map(_.map(_.toBigInt)).map(_.toArray)
 
         def printRegs = {
             println("---------------------------------------Regs------------------------------------------")
-            val cov = getRegs.map(_.toList).toList
+            val cov = getRegs
             lineBuffer.print2D(cov)
         }
 
@@ -185,13 +185,13 @@ object rowBufferWriterSim extends App {
             clockDomain.forkStimulus(10)
             dut.init
 
-            val testCase1 = getLineBuffer(rowNum = W * row, colNum = I * col, Hout = h, channel = c, width = Width)
+            val testCase1 = getRowMatrix(rowNumOfBlocks = W * row, colNumOfBlocks = I * col, Hout = h, channel = c, width = Width)
             if (I * col > h)
                 testCase1.foreach(_.zipWithIndex.foreach { case (n, index) => if (index > h - 1) BigInt(0) })
             println("-----------------------------------------case1----------------------------------")
             print2D(testCase1)
             dut.writeBuffer(testCase1)
-            val testCase2 = getLineBuffer(rowNum = W * row, colNum = I * col, Hout = h, channel = c, width = Width)
+            val testCase2 = getRowMatrix(rowNumOfBlocks = W * row, colNumOfBlocks = I * col, Hout = h, channel = c, width = Width)
             println("-----------------------------------------case2----------------------------------")
             print2D(testCase2)
             dut.writeBuffer(testCase2)

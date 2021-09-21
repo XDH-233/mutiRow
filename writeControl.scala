@@ -84,8 +84,7 @@ case class writeControl(
     // counters
     val fillCount     = Counter(0, bufferRamCount / N - 1)
     val readHeadCount = RegInit(U(0, log2Up(1000) bits)) //TODO, The upper limit of readOutTimes is to be determined
-    val reWriteCount  = Counter(0, (M / N) - 1)
-
+    val reWriteRowCount = Counter(0, (M / N) - 1)
     val transferEndReg = RegNext(writerTransferEnd)
 
 
@@ -136,8 +135,8 @@ case class writeControl(
                 writeLineBuffer()
                 when(writerAddress === channel - 1) {
                     toBufferRam.sync := True
-                    reWriteCount.increment()
-                    when(reWriteCount.willOverflowIfInc) {
+                    reWriteRowCount.increment()
+                    when(reWriteRowCount.willOverflowIfInc) {
                         toBufferRam.sync := False
                         goto(readBufferRam)
                     }
@@ -195,18 +194,29 @@ object ctrlTestTopSim extends App {
         )).compile {
             val dut = new ctrlTestTop(n, m, hout, width, bufferRamCount, channel, k, s, delay, iw, wh, col, row)
             dut.writers.foreach(_.io.toControl.dataToRam simPublic())
+            dut.Ctrl.readHeadCount.simPublic()
+            dut.Ctrl.reWriteRowCount
+            dut.BufferRam.counter simPublic()
             dut
         }.doSim { dut =>
             import dut._
             import lineBuffer._
 
-            val fillCase = Array.fill(dut.bufferRamCount)(getLineBuffer(colNum = dut.col * dut.iw, rowNum = dut.row * dut.wh, Hout = dut.hout, channel = dut.channel, width = dut.width))
-
+            val bufferRamFillData = getRows(colNumOfBlocks = dut.col * dut.iw, rowNumOfBlocks = dut.row * dut.wh, Hout = dut.hout, channel = dut.channel, width = dut.width, rowNum = dut.bufferRamCount)
+            val bufferRamData     = Array.fill(dut.bufferRamCount)(Array.fill(dut.channel)(Array.fill(dut.hout)(BigInt(0))))
+//            bufferRamData.foreach(print2D(_))
             clockDomain.forkStimulus(10)
             dut.init
             println("--------------------------------fill-------------------------------------------------")
-//            fillCase.foreach(print2D(_))
-            dut.fill(fillCase.map((_.map(_.toArray).toArray)))
+            dut.write(bufferRamFillData, bufferRamData)
+//            bufferRamData.foreach(print2D(_))
+            println("--------------------------------read-------------------------------------------------")
+            dut.readBufferRam(bufferRamData)
+            println("--------------------------------write-------------------------------------------------")
+            val newBufferRamData = getRows(colNumOfBlocks = dut.col * dut.iw, rowNumOfBlocks = dut.row * dut.wh, Hout = dut.hout, channel = dut.channel, width = dut.width, rowNum = dut.m / dut.n * dut.n)
+            dut.write(newBufferRamData, bufferRamData)
+            println("--------------------------------read-------------------------------------------------")
+            dut.readBufferRam(bufferRamData)
             clockDomain.waitSampling(10)
         }
     }
@@ -226,37 +236,84 @@ object ctrlTestTopSim extends App {
             clockDomain.waitSampling()
         }
 
-        def fill(fillCase: Array[Array[Array[BigInt]]]) = {
 
-            fillCase.grouped(dut.n).foreach{nRow=>
-                clockDomain.waitSampling()
-                nRow.foreach(i=>print2D(i.map(_.toList).toList))
-                for(r <- 0 until dut.row){
-                    dut.dataIn.foreach(_.valid #= true)
-                    for(c <- 0 until dut.col){
-                        // write the block matrix of row
-                        nRow.zip(dut.dataIn).foreach{case(rowMatrix, ports)=>
-                            ports.payload.zipWithIndex.foreach{case(sig, sigIndex)=>
-                                sig #= rowMatrix(r * dut.wh + sigIndex / dut.wh)(c * dut.iw + (sigIndex % dut.iw))
-                            }
+
+        def readBufferRam(bufferRamData: Array[Array[Array[BigInt]]]) = {
+            peOut.data.ready #= true
+            peOut.switch #= false
+            val readHeadCount = dut.Ctrl.readHeadCount.toInt
+            for (r <- 0 until dut.row) {
+                for (c <- 0 until dut.channel) {
+                    peOut.row #= r
+                    peOut.Channel #= c
+                    clockDomain.waitSampling()
+                    //sampling the readOut of bufferRam
+//                    printf("row:     %2d\n", peOut.row.toBigInt)
+//                    printf("channel: %2d\n", peOut.Channel.toBigInt)
+                    val bufferRamOut = dut.peOut.data.payload.map(_.toBigInt).map(_.toString(2)).map(s => prefixZero(s, dut.hout * dut.width)).map(_.grouped(dut.width)).map(_.toArray).map(_.map(s => BigInt(s, 2))).toArray
+//                    print2D(bufferRamOut)
+                    bufferRamOut.zipWithIndex.foreach{case(portData, index)=>
+                        portData.reverse.zipWithIndex.foreach{case(num, numIndex)=>
+//                            assert(bufferRamData(readHeadCount % dut.bufferRamCount + index + r)(c)(numIndex) ==  num)
                         }
-                        clockDomain.waitSampling()
-                    }
-                    // wait for the wh channels to be read out
-                    dut.dataIn.foreach(_.valid #= false)
-                    for(r <- 0 until dut.wh){
-                        clockDomain.waitSampling()
-                        // sampling the readData
-                        val datatoRam = dut.writers.map(_.io.toControl.dataToRam.toBigInt.toString(2)).map{d=>
-                            if(d.length < dut.width * dut.hout)
-                                ("0" * (dut.width * dut.hout - d.length)) + d
-                            else
-                                d
-                        }.map(_.grouped(dut.width).map(BigInt(_,2))).map(_.toArray)
-                        print2D(datatoRam.map(_.toList).toList)
                     }
                 }
             }
+            println("assert done! fill -> read right")
+            peOut.switch #= true
+            peOut.data.ready #= false
+            clockDomain.waitSampling()
+            peOut.switch #= false
+            clockDomain.waitSampling()
+        }
+        def write(newBufferRemData: Array[Array[Array[BigInt]]], bufferRamData: Array[Array[Array[BigInt]]])={
+            newBufferRemData.grouped(dut.n).foreach{ nRows=>
+                clockDomain.waitSampling()
+                writeRows(nRows, bufferRamData)
+            }
+        }
+
+
+
+        def writeRows(nRow: Array[Array[Array[BigInt]]], bufferRamData: Array[Array[Array[BigInt]]]) = {
+            val counter = dut.BufferRam.counter.toInt
+//            nRow.foreach(i => print2D(i))
+            var linesOuted = 0
+            for (r <- 0 until dut.row) {
+                dut.dataIn.foreach(_.valid #= true)
+                for (c <- 0 until dut.col) {
+                    // write the block matrix of row
+                    nRow.zip(dut.dataIn).foreach { case (rowMatrix, ports)=>
+                        ports.payload.zipWithIndex.foreach { case (sig, sigIndex) =>
+                            sig #= rowMatrix(r * dut.wh + sigIndex / dut.wh)(c * dut.iw + (sigIndex % dut.iw))
+                        }
+                    }
+                    clockDomain.waitSampling()
+                }
+                // wait for the wh channels to be read out
+                dut.dataIn.foreach(_.valid #= false)
+                for (w<- 0 until dut.wh) {
+                    clockDomain.waitSampling()
+                    // sampling the readData
+                    val datatoRam: Array[Array[BigInt]] = dut.writers.map(_.io.toControl.dataToRam.toBigInt.toString(2)).map { d => prefixZero(d, dut.width * dut.hout) }.map(_.grouped(dut.width).map(BigInt(_, 2))).map(_.toArray)
+//                    print2D(datatoRam)
+                    if(linesOuted < dut.channel){
+                        for(i <- 0 until dut.n ){
+                            bufferRamData(counter * dut.n + i)(r * dut.wh + w) = datatoRam(i).reverse
+                        }
+                    }
+                    linesOuted += 1
+                }
+            }
+//            println("mem")
+//            bufferRamData.foreach(print2D(_))
+        }
+
+        def prefixZero(readOut: String, L: Int): String = {
+            if (readOut.length < L)
+                ("0" * (L - readOut.length)) + readOut
+            else
+                readOut
         }
     }
 }
