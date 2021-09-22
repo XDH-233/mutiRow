@@ -13,7 +13,7 @@ case class bufferRam(width: Int, writeCount: Int, depth: Int, inLineNum: Int) ex
     val counter = Reg(UInt(log2Up(writeCount) bits)) init (0) simPublic()
 
     when(io.sync) {
-        when(counter === writeCount) {
+        when(counter === writeCount - 1) {
             counter := 0
         } otherwise {
             counter := counter + 1
@@ -42,7 +42,7 @@ object bufferRamSim extends App {
     SimConfig.withWave.withConfig(SpinalConfig(
         defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH),
         defaultClockDomainFrequency = FixedFrequency(100 MHz)
-    )).compile(new bufferRam(width = 16, writeCount = 8, depth = 128, inLineNum = 3)).doSim { dut =>
+    )).compile(new bufferRam(width = 8, writeCount = 3, depth = 8, inLineNum = 5)).doSim { dut =>
         import dut._
         // dataRam Array to store the write date
         val dataRam = Array.ofDim[BigInt](dut.writeCount * dut.inLineNum, dut.depth)

@@ -185,7 +185,10 @@ object ctrlTestTopRTL extends App {
 }
 
 object ctrlTestTopSim extends App {
+    import lineBuffer._
+
     simNow(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 8, channel = 7, k = 3, s = 1, delay = 5, iw = 2, wh = 2, col = 5, row = 4)
+//    simNow(n = 5, m = 7, k = 5, bufferRamCount = 15, channel = 13, hout = 13, iw=4, wh = 4, col = 4, row = 4, delay = 5, s = 1, width = 8)
 
     def simNow(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, s: Int, delay: Int, iw: Int, wh: Int, col: Int, row: Int) = {
         SimConfig.withWave.withConfig(SpinalConfig(
@@ -200,7 +203,6 @@ object ctrlTestTopSim extends App {
             dut
         }.doSim { dut =>
             import dut._
-            import lineBuffer._
 
             val bufferRamFillData = getRows(colNumOfBlocks = dut.col * dut.iw, rowNumOfBlocks = dut.row * dut.wh, Hout = dut.hout, channel = dut.channel, width = dut.width, rowNum = dut.bufferRamCount)
             val bufferRamData     = Array.fill(dut.bufferRamCount)(Array.fill(dut.channel)(Array.fill(dut.hout)(BigInt(0))))
@@ -208,17 +210,17 @@ object ctrlTestTopSim extends App {
             clockDomain.forkStimulus(10)
             dut.init
             println("--------------------------------fill-------------------------------------------------")
-            dut.write(bufferRamFillData, bufferRamData)
-//            bufferRamData.foreach(print2D(_))
-            println("--------------------------------read-------------------------------------------------")
-            dut.readBufferRam(bufferRamData)
-            println("--------------------------------write-------------------------------------------------")
-            val newBufferRamData = getRows(colNumOfBlocks = dut.col * dut.iw, rowNumOfBlocks = dut.row * dut.wh, Hout = dut.hout, channel = dut.channel, width = dut.width, rowNum = dut.m / dut.n * dut.n)
-            dut.write(newBufferRamData, bufferRamData)
-            println("--------------------------------read-------------------------------------------------")
-            dut.readBufferRam(bufferRamData)
+            dut.writeAndRead(bufferRamFillData, bufferRamData)
+//            println("assert done! fill -> read right")
+            for(i <- 0 until 100){
+                val newBufferRamData = getRows(colNumOfBlocks = dut.col * dut.iw, rowNumOfBlocks = dut.row * dut.wh, Hout = dut.hout, channel = dut.channel, width = dut.width, rowNum = dut.m / dut.n * dut.n)
+                dut.writeAndRead(newBufferRamData, bufferRamData)
+//                println("assert done! fill -> read " + ("-> write -> read" * (i + 1)) + "right")
+            }
             clockDomain.waitSampling(10)
+
         }
+
     }
 
     implicit class ctrlSIm(dut: ctrlTestTop) {
@@ -254,12 +256,11 @@ object ctrlTestTopSim extends App {
 //                    print2D(bufferRamOut)
                     bufferRamOut.zipWithIndex.foreach{case(portData, index)=>
                         portData.reverse.zipWithIndex.foreach{case(num, numIndex)=>
-//                            assert(bufferRamData(readHeadCount % dut.bufferRamCount + index + r)(c)(numIndex) ==  num)
+                            assert(bufferRamData((readHeadCount  + index + r) % dut.bufferRamCount)(c)(numIndex) ==  num)
                         }
                     }
                 }
             }
-            println("assert done! fill -> read right")
             peOut.switch #= true
             peOut.data.ready #= false
             clockDomain.waitSampling()
@@ -273,7 +274,13 @@ object ctrlTestTopSim extends App {
             }
         }
 
-
+        def writeAndRead(newBufferRamData: Array[Array[Array[BigInt]]], bufferRamData: Array[Array[Array[BigInt]]])={
+            println("--------------------------------write-------------------------------------------------")
+            dut.write(newBufferRamData, bufferRamData)
+//            bufferRamData.foreach(print2D(_))
+            println("--------------------------------read-------------------------------------------------")
+            dut.readBufferRam(bufferRamData)
+        }
 
         def writeRows(nRow: Array[Array[Array[BigInt]]], bufferRamData: Array[Array[Array[BigInt]]]) = {
             val counter = dut.BufferRam.counter.toInt
