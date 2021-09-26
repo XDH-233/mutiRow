@@ -7,10 +7,28 @@ import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.fsm._
 
+case class rowBufferWriterPorts(Hout: Int, dataWidth: Int, channel: Int) extends Bundle with IMasterSlave {
+    val transferStart = Bool()
+    val transferEnd   = Bool()
+    val dataToRam     = Bits(Hout * dataWidth bits)
+    val wrEn          = Bool()
+    val address       = UInt(log2Up(channel) bits)
+
+    override def asMaster(): Unit = {
+        out(transferEnd, dataToRam, wrEn, address)
+        in(transferStart)
+    }
+}
+object rowBufferWriterPorts{
+    def apply(ctrl: writeControl): rowBufferWriterPorts={
+        rowBufferWriterPorts(ctrl.Hout, ctrl.dataWidth, ctrl.channel)
+    }
+}
+
 case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int) extends Component {
     val io = new Bundle {
-        val dataIn        = slave Stream (Vec(Bits(width bits), Iw * Wh))
-        val toControl     = master(rowBufferWriterPorts(Hout = Hout, dataWidth = width, channel = channel))
+        val dataIn    = slave Stream (Vec(Bits(width bits), Iw * Wh))
+        val toControl = master(rowBufferWriterPorts(Hout = Hout, dataWidth = width, channel = channel))
     }
     noIoPrefix()
 
@@ -108,7 +126,9 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
 
 object lineBuffer {
     def getRowMatrix(rowNumOfBlocks: Int, colNumOfBlocks: Int, channel: Int, Hout: Int, width: Int) = List.tabulate(rowNumOfBlocks, colNumOfBlocks)((i, j) => if (i > channel - 1 || j > Hout - 1) BigInt(0) else BigInt(width, scala.util.Random)).map(_.toArray).toArray
-    def getRows(rowNumOfBlocks: Int, colNumOfBlocks: Int, channel: Int, Hout: Int, width: Int, rowNum: Int): Array[Array[Array[BigInt]]] =Array.fill(rowNum)(getRowMatrix(rowNumOfBlocks, colNumOfBlocks, channel, Hout, width))
+
+    def getRows(dut: ctrlTestTop, num: Int)= Array.fill(num)(getRowMatrix(dut.row * dut.wh, dut.col * dut.iw, dut.channel, dut.hout, dut.width))
+
     def print2D(buffer: Array[Array[BigInt]]) = {
         buffer.foreach { seq =>
             seq.foreach(b => printf("%6d ", b))
@@ -158,7 +178,7 @@ object rowBufferWriterSim extends App {
             }
         }
 
-        def getRegs= dut.blockRegs.map(_.map(_.toBigInt)).map(_.toArray)
+        def getRegs = dut.blockRegs.map(_.map(_.toBigInt)).map(_.toArray)
 
         def printRegs = {
             println("---------------------------------------Regs------------------------------------------")
@@ -174,7 +194,7 @@ object rowBufferWriterSim extends App {
         SimConfig.withWave.withConfig(SpinalConfig(
             defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH),
             defaultClockDomainFrequency = FixedFrequency(100 MHz)
-        )).compile {
+            )).compile {
             val dut = rowBufferWriter(Hout = h, channel = c, width = Width, Iw = I, Wh = W, colCount = col, rowCount = row)
             dut.blockRegs.foreach(_.simPublic())
             dut

@@ -19,6 +19,12 @@ case class bufferRamRWPorts(dataWidth: Int, depth: Int, inCount: Int, bufferRamC
     }
 }
 
+object bufferRamRWPorts{
+    def apply(ctrl: writeControl): bufferRamRWPorts={
+        bufferRamRWPorts(dataWidth = ctrl.dataWidth * ctrl.Hout, inCount = ctrl.N, bufferRamCount = ctrl.bufferRamCount, depth = ctrl.channel)
+    }
+}
+
 case class bufferRamRW(dataWidth: Int, inCount: Int, bufferRamCount: Int, depth: Int) extends Component {
     val io = slave(bufferRamRWPorts(dataWidth, depth, inCount, bufferRamCount))
     noIoPrefix()

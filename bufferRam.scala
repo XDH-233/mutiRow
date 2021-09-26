@@ -5,6 +5,24 @@ import spinal.sim._
 import spinal.core.sim._
 import spinal.lib._
 
+case class bufferRamPorts(dataWidth: Int, depth: Int, inLineNum: Int, lineBufferNum: Int) extends Bundle with IMasterSlave {
+    val wrEn      = Bool() // 0 -> write, 1 -> read
+    val writeData = Vec(Bits(dataWidth bits), inLineNum)
+    val address   = UInt(log2Up(depth) bits)
+    val sync      = Bool()
+    val readData  = Vec(Bits(dataWidth bits), lineBufferNum)
+
+    override def asMaster(): Unit = {
+        in(readData)
+        out(wrEn, writeData, address, sync)
+    }
+}
+
+object bufferRamPorts {
+    def apply(ctrl: writeControl): bufferRamPorts={
+        bufferRamPorts(ctrl.dataWidth * ctrl.Hout, ctrl.channel, ctrl.N, ctrl.bufferRamCount)
+    }
+}
 
 case class bufferRam(width: Int, writeCount: Int, depth: Int, inLineNum: Int) extends Component {
     val io = slave(new bufferRamPorts(dataWidth = width, depth = depth, inLineNum = inLineNum, lineBufferNum = writeCount * inLineNum))
