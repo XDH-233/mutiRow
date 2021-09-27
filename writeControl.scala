@@ -69,33 +69,66 @@ case class writeControl(
 
     //-------------------------------------------------new stateMachine-------------------------------------------------
     val FSM = new StateMachine {
-        val idle         = new State with EntryPoint
-        val fill         = new State
-        val readAndWrite = new State
-        val Switch       = new State
+        val idle         = new State with EntryPoint // 1
+        val fill         = new State // 2
+        val read         = new State // 3
+        val write        = new State // 4
+        val Switch       = new State // 5
+        val readAndWrite = new State // 6
         idle.whenIsActive {
             writerTransferStart := True
             goto(fill)
         }
         fill.whenIsActive {
             when(writerWrEn) {
-                writeLineBuffer()
+                writeBufferRam()
                 when(writerAddress === channel - 1) {
                     toBufferRamRW.sync := True
                     fillCount.increment()
                     when(fillCount.willOverflowIfInc) {
-                        goto(readAndWrite)
-                        //                        toBufferRamRW.sync := False
+                        goto(read)
+                        writeHead.clearAll()
                     }
                 }
             } elsewhen (transferEndReg) {
                 writerTransferStart := True
             }
         }
+        read.whenIsActive {
+            readBufferRam()
+        }
+        write.whenIsActive {
+            when(writeHead + N <= readHead) {
+                writeBufferRam()
+            } otherwise {
+                goto(read)
+            }
+        }
         readAndWrite.whenIsActive {
-            toBufferRamRW.readAddress := toPe.Channel
+            readBufferRam()
+            // write part
+            when(writeHead + N <= readHead) {
+                writeBufferRam()
+            }
+        }
+        Switch.whenIsActive {
+            writerTransferStart := True
+            if (bufferRamCount == scala.math.ceil((K + M - 1).toDouble / N.toDouble) * N) {
+                goto(write)
+            } else {
+                when((readHead + K + M - 2) % bufferRamCount >= writeHead % bufferRamCount && readHead % bufferRamCount + K + M - 2 > bufferRamCount - 1) {
+                    goto(write)
+                } otherwise {
+                    goto(readAndWrite)
+                }
+            }
+
+        }
+
+        def readBufferRam() = {
             // read part
             when(toPe.data.ready) {
+                toBufferRamRW.readAddress := toPe.Channel
                 toPe.data.valid := True
                 toPe.data.payload.zipWithIndex.foreach { case (peData, index) =>
                     peData := toBufferRamRW.readData.read(((readHead + toPe.row.resize(readHead.getWidth) + index) % bufferRamCount).resize(log2Up(bufferRamCount)))
@@ -104,33 +137,23 @@ case class writeControl(
                 readHead := readHead + M
                 goto(Switch)
             }
-            // write part
-            when(writeHead + N <= readHead) {
-                when(writerWrEn) {
-                    writeLineBuffer()
-                    when(writerAddress === channel - 1) {
-                        toBufferRamRW.sync := True
-                        writeHead := writeHead + N
-                    }
-                } elsewhen (transferEndReg) {
-                    writerTransferStart := True
-                }
-            }
         }
-        Switch.whenIsActive {
-            when(writeHead + N < readHead) {
+
+        def writeBufferRam() = {
+            when(writerWrEn) {
+                fromWriter.zip(toBufferRamRW.writeData).foreach { case (writer, wData) => wData := writer.dataToRam }
+                toBufferRamRW.wrEn := writerWrEn
+                toBufferRamRW.writeAddress := writerAddress
+                when(writerAddress === channel - 1) {
+                    toBufferRamRW.sync := True
+                    writeHead := writeHead + N
+                }
+            } elsewhen (transferEndReg) {
                 writerTransferStart := True
             }
-            goto(readAndWrite)
         }
     }
 
-
-    def writeLineBuffer() = {
-        fromWriter.zip(toBufferRamRW.writeData).foreach { case (writer, wData) => wData := writer.dataToRam }
-        toBufferRamRW.wrEn := writerWrEn
-        toBufferRamRW.writeAddress := writerAddress
-    }
 
     def getWriters(iw: Int, wh: Int, colBlockCount: Int, rowBlockCount: Int): Array[rowBufferWriter] = {
         Array.fill(N)(rowBufferWriter(width = dataWidth, Iw = iw, Wh = wh, channel = channel, Hout = Hout, colCount = colBlockCount, rowCount = rowBlockCount))
@@ -151,10 +174,10 @@ case class ctrlTestTop(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: In
     val Ctrl      = writeControl(dataWidth = width, N = n, M = m, bufferRamCount = bufferRamCount, Hout = hout, channel = channel, K = k, S = s, firstDelay = delay)
     val writers   = Ctrl.getWriters(iw = iw, wh = wh, colBlockCount = col, rowBlockCount = row)
     val BufferRam = Ctrl.getBufferRamRW
-    writers.zip(Ctrl.fromWriter).foreach { case (w, c) => w.io.toControl <> c }
+    writers.zip(Ctrl.fromWriter).foreach { case (w, c) => w.toControl <> c }
     BufferRam.io <> Ctrl.toBufferRamRW
     val dataIn = Array.fill(n)(slave(Stream(Vec(Bits(width bits), iw * wh))))
-    dataIn.zip(writers).foreach { case (i, w) => i <> w.io.dataIn }
+    dataIn.zip(writers).foreach { case (i, w) => i <> w.dataIn }
 
     val peOut = master(pePorts(Ctrl))
     peOut <> Ctrl.toPe
@@ -163,7 +186,7 @@ case class ctrlTestTop(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: In
 object ctrlTestTopRTL extends App {
     SpinalConfig(
         defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH)
-        ).generateVerilog(new ctrlTestTop(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 8, channel = 7, k = 3, s = 1, delay = 5, iw = 2, wh = 2, col = 5, row = 4))
+        ).generateVerilog(new ctrlTestTop(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 10, channel = 7, k = 3, s = 1, delay = 5, iw = 2, wh = 2, col = 5, row = 4))
 }
 
 object ctrlTestTopSim extends App {
@@ -171,7 +194,7 @@ object ctrlTestTopSim extends App {
     import lineBuffer._
 
     //    simNow(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 8, channel = 7, k = 3, s = 1, delay = 5, iw = 2, wh = 2, col = 5, row = 4)
-    simNow(n = 2, m = 5, k = 3, bufferRamCount = 16, channel = 7, hout = 9, iw = 2, wh = 2, col = 5, row = 4, delay = 5, s = 1, width = 8)
+    simNow(n = 2, m = 5, k = 3, bufferRamCount = 10, channel = 7, hout = 9, iw = 2, wh = 2, col = 5, row = 4, delay = 5, s = 1, width = 8)
 
     def simNow(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, s: Int, delay: Int, iw: Int, wh: Int, col: Int, row: Int) = {
         SimConfig.withWave.withConfig(SpinalConfig(
@@ -179,7 +202,7 @@ object ctrlTestTopSim extends App {
             defaultClockDomainFrequency = FixedFrequency(100 MHz)
             )).compile {
             val dut = new ctrlTestTop(n, m, hout, width, bufferRamCount, channel, k, s, delay, iw, wh, col, row)
-            dut.writers.foreach(_.io.toControl.dataToRam simPublic())
+            dut.writers.foreach(_.toControl.dataToRam simPublic())
             dut.BufferRam.counter.value simPublic()
             dut.Ctrl.readHead.simPublic()
             dut.Ctrl.writeHead.simPublic()
@@ -195,7 +218,7 @@ object ctrlTestTopSim extends App {
             //            bufferRamData.foreach(print2D(_))
 
             clockDomain.forkStimulus(10)
-            SimTimeout(20000 * 10)
+            SimTimeout(200000 * 10)
             dut.init
             dut.fill(bufferRamFillData, bufferRamData)
             println("-------------------------------------after fill--------------------------------------------------")
@@ -208,7 +231,7 @@ object ctrlTestTopSim extends App {
                     if (Ctrl.writerWrEn.toBoolean) {
                         val bufferRamCounter = dut.BufferRam.counter.value.toInt
                         val address          = dut.Ctrl.writerAddress.toInt
-                        val writerOutData    = dut.writers.map(_.io.toControl.dataToRam).map(dut.longBitsCov(_))
+                        val writerOutData    = dut.writers.map(_.toControl.dataToRam).map(dut.longBitsCov(_))
                         println(s"---------output ${dut.wh} lines-----------------------")
                         println("address: " + address)
                         print2D(writerOutData)
@@ -228,11 +251,13 @@ object ctrlTestTopSim extends App {
                         peOut.Channel #= scala.util.Random.nextInt(dut.channel)
                         clockDomain.waitSampling()
                         val state = dut.Ctrl.FSM.stateReg.toBigInt
-                        if(state == 4){
+                        if (state == 4) {
                             println("--------------readAndWrite------------")
-                            bufferRamData.foreach{print2D(_)}
+                            bufferRamData.foreach {
+                                print2D(_)
+                            }
                         }
-                        if(peOut.data.ready.toBoolean && peOut.data.valid.toBoolean){
+                        if (peOut.data.ready.toBoolean && peOut.data.valid.toBoolean) {
                             val row      = peOut.row.toInt
                             val Channel  = peOut.Channel.toInt
                             val payload  = peOut.data.payload.map(dut.longBitsCov(_)).toArray
@@ -242,9 +267,9 @@ object ctrlTestTopSim extends App {
                             println("row: " + row)
                             println("channel: " + Channel)
                             print2D(payload)
-                            payload.zipWithIndex.foreach{case(port, index)=>
-                                bufferRamData((readHead + row + index) % dut.bufferRamCount)(Channel).zip(port.reverse).foreach{case(b,p)=> assert(b == p)}
-                            }
+//                            payload.zipWithIndex.foreach { case (port, index) =>
+//                                bufferRamData((readHead + row + index) % dut.bufferRamCount)(Channel).zip(port.reverse).foreach { case (b, p) => assert(b == p) }
+//                            }
                         }
                     }
                     peOut.switch #= true
@@ -292,7 +317,7 @@ object ctrlTestTopSim extends App {
                     dut.dataIn.foreach(_.valid #= false)
                     for (w <- 0 until dut.wh) {
                         clockDomain.waitSampling()
-                        val datatoRam = dut.writers.map(_.io.toControl.dataToRam.toBigInt.toString(2)).map { d => prefixZero(d, dut.width * dut.hout) }.map(_.grouped(dut.width).map(BigInt(_, 2))).map(_.toArray)
+                        val datatoRam = dut.writers.map(_.toControl.dataToRam.toBigInt.toString(2)).map { d => prefixZero(d, dut.width * dut.hout) }.map(_.grouped(dut.width).map(BigInt(_, 2))).map(_.toArray)
                         //                        print2D(datatoRam)
                         if (lineOuted < dut.channel) {
                             for (i <- 0 until dut.n) {

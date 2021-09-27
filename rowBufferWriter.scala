@@ -23,24 +23,24 @@ object rowBufferWriterPorts{
     def apply(ctrl: writeControl): rowBufferWriterPorts={
         rowBufferWriterPorts(ctrl.Hout, ctrl.dataWidth, ctrl.channel)
     }
+    def apply(writer: rowBufferWriter): rowBufferWriterPorts={
+        rowBufferWriterPorts(writer.Hout, writer.width, writer.channel)
+    }
 }
 
 case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int) extends Component {
-    val io = new Bundle {
-        val dataIn    = slave Stream (Vec(Bits(width bits), Iw * Wh))
-        val toControl = master(rowBufferWriterPorts(Hout = Hout, dataWidth = width, channel = channel))
-    }
-    noIoPrefix()
+    val dataIn    = slave Stream (Vec(Bits(width bits), Iw * Wh))
+    val toControl = master(rowBufferWriterPorts(this))
 
     val blockRegs            = Array.fill(Wh)(Vec(Reg(Bits(width bits)) init (0), Hout))
     val colCounter           = Reg(UInt(log2Up(colCount) + 1 bits)) init (0)
     val rowCounter           = Reg(UInt(log2Up(Wh) + 1 bits)) init (0)
     val lineBufferRowCounter = Reg(UInt(log2Up(channel) bits)) init (0)
-    io.toControl.dataToRam := 0
-    io.dataIn.ready := False
-    io.toControl.wrEn := False
-    io.toControl.transferEnd := False
-    io.toControl.address := 0
+    toControl.dataToRam := 0
+    dataIn.ready := False
+    toControl.wrEn := False
+    toControl.transferEnd := False
+    toControl.address := 0
 
     val FSM = new StateMachine {
         val idle            = new State with EntryPoint
@@ -49,8 +49,8 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
         val transferEnd     = new State
 
         idle.whenIsActive {
-            io.dataIn.ready := False
-            when(io.toControl.transferStart) {
+            dataIn.ready := False
+            when(toControl.transferStart) {
                 goto(blocksReceiving)
             } otherwise {
                 goto(idle)
@@ -59,15 +59,15 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
 
 
         blocksReceiving.whenIsActive {
-            io.dataIn.ready := True
-            when(io.dataIn.valid) {
+            dataIn.ready := True
+            when(dataIn.valid) {
                 for (w <- 0 until Wh) {
                     for (i <- 0 until Iw) {
                         switch(colCounter) {
                             for (c <- 0 until colCount) {
                                 if (c * Iw + i < Hout) {
                                     is(c) {
-                                        blockRegs(w)(c * Iw + i) := io.dataIn.payload(w * Iw + i)
+                                        blockRegs(w)(c * Iw + i) := dataIn.payload(w * Iw + i)
                                     }
                                 }
                             }
@@ -85,15 +85,15 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
         }
 
         rowsSending.whenIsActive {
-            io.dataIn.ready := False
-            io.toControl.wrEn := True
-            io.toControl.address := lineBufferRowCounter
+            dataIn.ready := False
+            toControl.wrEn := True
+            toControl.address := lineBufferRowCounter
 
             switch(rowCounter) {
                 for (r <- 0 until Wh) {
                     is(r) {
                         blockRegs(r).zipWithIndex.foreach { case (reg, index) =>
-                            io.toControl.dataToRam((index + 1) * width - 1 downto index * width) := reg
+                            toControl.dataToRam((index + 1) * width - 1 downto index * width) := reg
                         }
                     }
                 }
@@ -115,8 +115,8 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
         }
 
         transferEnd.whenIsActive {
-            io.toControl.transferEnd := True
-            io.dataIn.ready := False
+            toControl.transferEnd := True
+            dataIn.ready := False
             goto(idle)
         }
     }
@@ -140,40 +140,41 @@ object lineBuffer {
 
 
 object rowBufferWriterSim extends App {
+    simNow(h = 11, c = 9, Width = 8, W = 2, I = 2, col = 6, row = 5)
     implicit class simMethod(dut: rowBufferWriter) {
         def init = {
-            dut.io.dataIn.valid #= false
-            dut.io.toControl.transferStart #= false
-            dut.io.dataIn.payload.foreach(_ #= 0)
+            dut.dataIn.valid #= false
+            dut.toControl.transferStart #= false
+            dut.dataIn.payload.foreach(_ #= 0)
             dut.clockDomain.waitSampling()
         }
 
         def writeBuffer(buffer: Array[Array[BigInt]]) = {
-            dut.io.toControl.transferStart #= true
-            dut.io.dataIn.valid #= false
+            dut.toControl.transferStart #= true
+            dut.dataIn.valid #= false
             dut.clockDomain.waitSampling()
-            dut.io.toControl.transferStart #= false
+            dut.toControl.transferStart #= false
             for (c <- 0 until dut.rowCount) {
-                dut.io.dataIn.valid #= true
+                dut.dataIn.valid #= true
                 for (t <- 0 until dut.colCount) {
-                    dut.io.dataIn.payload.zipWithIndex.foreach { case (port, index) => port #= buffer(c * dut.Wh + index / dut.Iw)(t * dut.Iw + index % dut.Iw) }
+                    dut.dataIn.payload.zipWithIndex.foreach { case (port, index) => port #= buffer(c * dut.Wh + index / dut.Iw)(t * dut.Iw + index % dut.Iw) }
                     dut.clockDomain.waitSampling()
                     printRegs
                 }
-                dut.io.dataIn.valid #= false
+                dut.dataIn.valid #= false
                 println("***************************************Out***************************************")
                 for (o <- 0 until dut.Wh) {
                     if (c * dut.Wh + o < dut.channel) {
                         dut.clockDomain.waitSampling()
                         if (o == 0) printRegs
-                        var resString = dut.io.toControl.dataToRam.toBigInt.toString(2)
+                        var resString = dut.toControl.dataToRam.toBigInt.toString(2)
                         if (resString.length < dut.width * dut.Hout)
                             resString = ("0" * (dut.Hout * dut.width - resString.length)) + resString
                         resString.grouped(dut.width).map(s => BigInt(s, 2)).foreach(n => printf("%6d ", n))
                         println("")
                     }
                 }
-                dut.io.dataIn.ready #= false
+                dut.dataIn.ready #= false
                 dut.clockDomain.waitSampling(3)
             }
         }
@@ -218,7 +219,7 @@ object rowBufferWriterSim extends App {
         }
     }
 
-    simNow(h = 11, c = 9, Width = 8, W = 2, I = 2, col = 6, row = 5)
+
 }
 
 
