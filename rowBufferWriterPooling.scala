@@ -7,6 +7,21 @@ import spinal.lib._
 import spinal.lib.fsm._
 
 
+object Compare {
+    def compare(vec: Vec[UInt]): UInt = vec.reduceBalancedTree((i, j) => comp(i, j))
+
+    def comp(i: UInt, j: UInt): UInt = {
+        val r = UInt(i.getWidth bits)
+        when(i < j) {
+            r := j
+        } otherwise {
+            r := i
+        }
+        r
+    }
+}
+
+
 case class rowBufferWriterPoolingPorts(dataWidth: Int, poolingSize: Int, Hout: Int, channel: Int) extends Bundle with IMasterSlave {
     val transferStart = Bool()
     val transferEnd   = Bool()
@@ -27,6 +42,9 @@ object rowBufferWriterPoolingPorts {
 }
 
 case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int, poolingSize: Int) extends Component {
+
+    import Compare._
+
     val toControl = master(rowBufferWriterPoolingPorts(this))
     val dataIn    = slave Stream (Vec(UInt(dataWidth bits), Iw * Wh))
 
@@ -91,7 +109,7 @@ case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int
                 for (r <- 0 until Wh) {
                     is(r) {
                         val c = Vec(Vec(blockRegs(r).grouped(poolingSize).map(Vec(_))).map(compare(_)))
-                        toControl.dataOut.zip(c).foreach{case(o, i)=> o :=i}
+                        toControl.dataOut.zip(c).foreach { case (o, i) => o := i }
                     }
                 }
             }
@@ -117,38 +135,93 @@ case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int
             goto(idle)
         }
     }
+}
 
-    def compare(vec: Vec[UInt]): UInt = vec.reduceBalancedTree((i, j) => comp(i, j))
+case class writersPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int, poolingSize: Int) extends Component {
 
-    def comp(i: UInt, j: UInt): UInt = {
-        val r = UInt(i.getWidth bits)
-        when(i < j) {
-            r := j
-        } otherwise {
-            r := i
-        }
-        r
+    import Compare._
+
+    val transferStart = in Bool()
+    val transferEnd   = out Bool()
+    val address       = out UInt (log2Up(channel) bits)
+    val wrEn          = out Bool()
+    val dataIn        = Array.fill(poolingSize)(slave Stream (Vec(UInt(dataWidth bits), Iw * Wh)))
+    val writers       = Array.fill(poolingSize)(rowBufferWriterPooling(dataWidth, Iw, Wh, channel, Hout, colCount, rowCount, poolingSize))
+    val dataOut       = out Vec(UInt(dataWidth bits), writers(0).toControl.dataOut.length)
+    dataIn.zip(writers).foreach { case (i, w) => i <> w.dataIn }
+    writers.foreach(_.toControl.transferStart := transferStart)
+    transferEnd := writers(0).toControl.transferEnd
+    address := writers(0).toControl.address
+    wrEn := writers(0).toControl.wrEn
+    dataOut.zipWithIndex.foreach { case (o, i) =>
+        o := compare(Vec(writers.map(_.toControl.dataOut(i))))
     }
 }
 
-object rowBufferWriterPoolingSim extends App{
+object writersPoolingSim extends App{
+    import lineBuffer._
+
     SimConfig.withWave.withConfig(SpinalConfig(
         defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH),
         defaultClockDomainFrequency = FixedFrequency(100 MHz)
-    )).compile{
-        val dut  = new rowBufferWriterPooling(8, 2,2,7,9,5,4,2)
+    )).compile(new writersPooling(8, 2,2, 7, 9, 5,4, 2)).doSim { dut =>
+        import dut._
+        clockDomain.forkStimulus(10000)
+        dut.init
+        val rowMatrixArr = Array.fill(poolingSize)(getRowMatrix(8, 10, 7, 9, 8))
+        rowMatrixArr.foreach(print2D(_))
+        dut.writeRows(rowMatrixArr)
+    }
+    implicit class writerPoolingSimMeth(dut: writersPooling){
+        import dut._
+
+        def init={
+            transferStart #= false
+            dataIn.foreach(_.valid #= false)
+            dataIn.foreach(_.payload.foreach(_#=0))
+            clockDomain.waitSampling()
+        }
+        def writeRows(rowMatrixArr: Array[Array[Array[BigInt]]])={
+            transferStart #= true
+            clockDomain.waitSampling()
+            transferStart #= false
+            dataIn.foreach(_.valid#=true)
+            for(r <- 0 until rowCount){
+                for(c <- 0 until colCount){
+                    dataIn.zipWithIndex.foreach{case(s, i)=>
+                        s.payload.zipWithIndex.foreach{case(sig, j)=>
+                            sig #= rowMatrixArr(i)(r * Wh + j / Iw)(c * Iw + j % Iw)
+                        }
+                    }
+                    clockDomain.waitSampling()
+                }
+                clockDomain.waitSampling(Wh)
+            }
+        }
+    }
+}
+
+
+object rowBufferWriterPoolingSim extends App {
+    SimConfig.withWave.withConfig(SpinalConfig(
+        defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH),
+        defaultClockDomainFrequency = FixedFrequency(100 MHz)
+        )).compile {
+        val dut = new rowBufferWriterPooling(8, 2, 2, 7, 9, 5, 4, 2)
         dut.blockRegs.foreach(_.simPublic())
         dut
     }.doSim { dut =>
         dut.clockDomain.forkStimulus(10000)
         dut.init
-        val rowMatrix = lineBuffer.getRowMatrix(8,10,7,9,8)
+        val rowMatrix = lineBuffer.getRowMatrix(8, 10, 7, 9, 8)
         lineBuffer.print2D(rowMatrix)
         dut.writeBuffer(rowMatrix)
     }
 
     implicit class simMethod(dut: rowBufferWriterPooling) {
+
         import dut._
+
         def init = {
             dataIn.valid #= false
             toControl.transferStart #= false
@@ -169,9 +242,9 @@ object rowBufferWriterPoolingSim extends App{
                     printRegs
                 }
                 dataIn.valid #= false
-                println("***************************************Out***************************************")
+                //                println("***************************************Out***************************************")
                 clockDomain.waitSampling()
-                for(i <- 0 until Wh){
+                for (i <- 0 until Wh) {
                     clockDomain.waitSampling()
                 }
                 clockDomain.waitSampling(3)

@@ -34,8 +34,8 @@ case class writeControl(
                            Hout: Int = 6,
                            channel: Int,
                            K: Int = 3, // kennel size
-                           S: Int = 1, // kernel step
-                           firstDelay: Int) extends Component {
+                           F: Int) extends Component {
+    require(F % N == 0 && F >= scala.math.ceil((K + M - 1) / N).toInt * N && F <= bufferRamCount, "wrong fillRowNum !")
     //---------------------------------------io-------------------------------------------------------------------------
     val fromWriter    = Array.fill(N)(slave(rowBufferWriterPorts(this)))
     val toBufferRamRW = master(bufferRamRWPorts(this))
@@ -62,67 +62,53 @@ case class writeControl(
     toBufferRamRW.writeData.foreach(_ := 0)
 
     // counters
-    val fillCount      = Counter(0, bufferRamCount / N - 1)
+    val fillCount      = Counter(0, F / N - 1)
     val transferEndReg = RegNext(writerTransferEnd)
 
-    val writeHead, readHead = Reg(UInt(16 bits)) init (0) //TODO, The upper limit of readOutTimes is to be determined
-
+    val writeHead, readHead, readTail = Reg(UInt(16 bits)) init (0)
+    readTail := readHead + K + M - 2
     //-------------------------------------------------new stateMachine-------------------------------------------------
     val FSM = new StateMachine {
         val idle         = new State with EntryPoint // 1
         val fill         = new State // 2
-        val read         = new State // 3
-        val write        = new State // 4
-        val Switch       = new State // 5
-        val readAndWrite = new State // 6
+        val readAndWrite = new State // 3
+        val Switch       = new State // 4
+
         idle.whenIsActive {
             writerTransferStart := True
             goto(fill)
         }
         fill.whenIsActive {
             when(writerWrEn) {
-                writeBufferRam()
+                wrightAssign()
                 when(writerAddress === channel - 1) {
                     toBufferRamRW.sync := True
                     fillCount.increment()
+                    writeHead := writeHead +  N
                     when(fillCount.willOverflowIfInc) {
-                        goto(read)
-                        writeHead.clearAll()
+                        when(readTail < writeHead){
+                            writerTransferStart := True
+                        }
+                        goto(readAndWrite)
                     }
                 }
             } elsewhen (transferEndReg) {
                 writerTransferStart := True
             }
         }
-        read.whenIsActive {
-            readBufferRam()
-        }
-        write.whenIsActive {
-            when(writeHead + N <= readHead) {
-                writeBufferRam()
-            } otherwise {
-                goto(read)
-            }
-        }
+
         readAndWrite.whenIsActive {
-            readBufferRam()
-            // write part
-            when(writeHead + N <= readHead) {
+            when(readTail < writeHead) {
+                readBufferRam()
+            }
+            when(writeHead + N <= readHead + bufferRamCount) {
                 writeBufferRam()
             }
+
         }
         Switch.whenIsActive {
             writerTransferStart := True
-            if (bufferRamCount == scala.math.ceil((K + M - 1).toDouble / N.toDouble) * N) {
-                goto(write)
-            } else {
-                when((readHead + K + M - 2) % bufferRamCount >= writeHead % bufferRamCount && readHead % bufferRamCount + K + M - 2 > bufferRamCount - 1) {
-                    goto(write)
-                } otherwise {
-                    goto(readAndWrite)
-                }
-            }
-
+            goto(readAndWrite)
         }
 
         def readBufferRam() = {
@@ -139,11 +125,15 @@ case class writeControl(
             }
         }
 
+        def wrightAssign() = {
+            fromWriter.zip(toBufferRamRW.writeData).foreach { case (writer, wData) => wData := writer.dataToRam }
+            toBufferRamRW.wrEn := writerWrEn
+            toBufferRamRW.writeAddress := writerAddress
+        }
+
         def writeBufferRam() = {
             when(writerWrEn) {
-                fromWriter.zip(toBufferRamRW.writeData).foreach { case (writer, wData) => wData := writer.dataToRam }
-                toBufferRamRW.wrEn := writerWrEn
-                toBufferRamRW.writeAddress := writerAddress
+                wrightAssign()
                 when(writerAddress === channel - 1) {
                     toBufferRamRW.sync := True
                     writeHead := writeHead + N
@@ -170,8 +160,8 @@ case class writeControl(
 }
 
 
-case class ctrlTestTop(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, s: Int, delay: Int, iw: Int, wh: Int, col: Int, row: Int) extends Component {
-    val Ctrl      = writeControl(dataWidth = width, N = n, M = m, bufferRamCount = bufferRamCount, Hout = hout, channel = channel, K = k, S = s, firstDelay = delay)
+case class ctrlTestTop(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, F: Int, iw: Int, wh: Int, col: Int, row: Int) extends Component {
+    val Ctrl      = writeControl(dataWidth = width, N = n, M = m, bufferRamCount = bufferRamCount, Hout = hout, channel = channel, K = k, F = F)
     val writers   = Ctrl.getWriters(iw = iw, wh = wh, colBlockCount = col, rowBlockCount = row)
     val BufferRam = Ctrl.getBufferRamRW
     writers.zip(Ctrl.fromWriter).foreach { case (w, c) => w.toControl <> c }
@@ -186,7 +176,7 @@ case class ctrlTestTop(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: In
 object ctrlTestTopRTL extends App {
     SpinalConfig(
         defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH)
-        ).generateVerilog(new ctrlTestTop(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 10, channel = 7, k = 3, s = 1, delay = 5, iw = 2, wh = 2, col = 5, row = 4))
+        ).generateVerilog(new ctrlTestTop(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 12, channel = 7, k = 3, F = 10, iw = 2, wh = 2, col = 5, row = 4))
 }
 
 object ctrlTestTopSim extends App {
@@ -194,14 +184,14 @@ object ctrlTestTopSim extends App {
     import lineBuffer._
 
     //    simNow(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 8, channel = 7, k = 3, s = 1, delay = 5, iw = 2, wh = 2, col = 5, row = 4)
-    simNow(n = 2, m = 5, k = 3, bufferRamCount = 10, channel = 7, hout = 9, iw = 2, wh = 2, col = 5, row = 4, delay = 5, s = 1, width = 8)
+    simNow(n = 2, m = 5, k = 3, bufferRamCount = 12, channel = 7, hout = 9, iw = 2, wh = 2, col = 5, row = 4, F = 10, width = 8)
 
-    def simNow(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, s: Int, delay: Int, iw: Int, wh: Int, col: Int, row: Int) = {
+    def simNow(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, F: Int, iw: Int, wh: Int, col: Int, row: Int) = {
         SimConfig.withWave.withConfig(SpinalConfig(
             defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH),
             defaultClockDomainFrequency = FixedFrequency(100 MHz)
             )).compile {
-            val dut = new ctrlTestTop(n, m, hout, width, bufferRamCount, channel, k, s, delay, iw, wh, col, row)
+            val dut = new ctrlTestTop(n, m, hout, width, bufferRamCount, channel, k, F, iw, wh, col, row)
             dut.writers.foreach(_.toControl.dataToRam simPublic())
             dut.BufferRam.counter.value simPublic()
             dut.Ctrl.readHead.simPublic()
@@ -220,7 +210,6 @@ object ctrlTestTopSim extends App {
             clockDomain.forkStimulus(10)
             SimTimeout(200000 * 10)
             dut.init
-            dut.fill(bufferRamFillData, bufferRamData)
             println("-------------------------------------after fill--------------------------------------------------")
             bufferRamData.foreach(print2D(_))
             val writeThread = fork {
@@ -244,7 +233,7 @@ object ctrlTestTopSim extends App {
             }
             val readThread  = fork {
                 for (i <- 0 until 100) {
-                    for (j <- 0 until 100) {
+                    for (j <- 0 until 200) {
                         peOut.data.ready #= true
                         peOut.switch #= false
                         peOut.row #= scala.util.Random.nextInt(dut.k)
@@ -262,14 +251,14 @@ object ctrlTestTopSim extends App {
                             val Channel  = peOut.Channel.toInt
                             val payload  = peOut.data.payload.map(dut.longBitsCov(_)).toArray
                             val readHead = Ctrl.readHead.toInt
-                            println("_______________read---------------------")
+                            println("----------------------------read---------------------")
                             println("readHead: " + readHead)
                             println("row: " + row)
                             println("channel: " + Channel)
                             print2D(payload)
-//                            payload.zipWithIndex.foreach { case (port, index) =>
-//                                bufferRamData((readHead + row + index) % dut.bufferRamCount)(Channel).zip(port.reverse).foreach { case (b, p) => assert(b == p) }
-//                            }
+                            payload.zipWithIndex.foreach { case (port, index) =>
+                                bufferRamData((readHead + row + index) % dut.bufferRamCount)(Channel).zip(port.reverse).foreach { case (b, p) => assert(b == p) }
+                            }
                         }
                     }
                     peOut.switch #= true
