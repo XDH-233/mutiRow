@@ -86,9 +86,6 @@ case class writeControl(
                     fillCount.increment()
                     writeHead := writeHead +  N
                     when(fillCount.willOverflowIfInc) {
-                        when(readTail < writeHead){
-                            writerTransferStart := True
-                        }
                         goto(readAndWrite)
                     }
                 }
@@ -145,8 +142,8 @@ case class writeControl(
     }
 
 
-    def getWriters(iw: Int, wh: Int, colBlockCount: Int, rowBlockCount: Int): Array[rowBufferWriter] = {
-        Array.fill(N)(rowBufferWriter(width = dataWidth, Iw = iw, Wh = wh, channel = channel, Hout = Hout, colCount = colBlockCount, rowCount = rowBlockCount))
+    def getWriters(iw: Int, ww: Int, colBlockCount: Int, rowBlockCount: Int): Array[rowBufferWriter] = {
+        Array.fill(N)(rowBufferWriter(width = dataWidth, Iw = iw, Ww = ww, channel = channel, Hout = Hout, colCount = colBlockCount, rowCount = rowBlockCount))
     }
 
     def getBufferRam: bufferRam = {
@@ -160,13 +157,13 @@ case class writeControl(
 }
 
 
-case class ctrlTestTop(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, F: Int, iw: Int, wh: Int, col: Int, row: Int) extends Component {
+case class lineBufferCtrl(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, F: Int, iw: Int, ww: Int, col: Int, row: Int) extends Component {
     val Ctrl      = writeControl(dataWidth = width, N = n, M = m, bufferRamCount = bufferRamCount, Hout = hout, channel = channel, K = k, F = F)
-    val writers   = Ctrl.getWriters(iw = iw, wh = wh, colBlockCount = col, rowBlockCount = row)
+    val writers   = Ctrl.getWriters(iw = iw, ww = ww, colBlockCount = col, rowBlockCount = row)
     val BufferRam = Ctrl.getBufferRamRW
     writers.zip(Ctrl.fromWriter).foreach { case (w, c) => w.toControl <> c }
     BufferRam.io <> Ctrl.toBufferRamRW
-    val dataIn = Array.fill(n)(slave(Stream(Vec(Bits(width bits), iw * wh))))
+    val dataIn = Array.fill(n)(slave(Stream(Vec(Bits(width bits), iw * ww))))
     dataIn.zip(writers).foreach { case (i, w) => i <> w.dataIn }
 
     val peOut = master(pePorts(Ctrl))
@@ -176,22 +173,21 @@ case class ctrlTestTop(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: In
 object ctrlTestTopRTL extends App {
     SpinalConfig(
         defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH)
-        ).generateVerilog(new ctrlTestTop(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 12, channel = 7, k = 3, F = 10, iw = 2, wh = 2, col = 5, row = 4))
+        ).generateVerilog(new lineBufferCtrl(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 12, channel = 7, k = 3, F = 10, iw = 2, ww = 2, col = 5, row = 4))
 }
 
 object ctrlTestTopSim extends App {
 
     import lineBuffer._
 
-    //    simNow(n = 2, m = 5, hout = 9, width = 8, bufferRamCount = 8, channel = 7, k = 3, s = 1, delay = 5, iw = 2, wh = 2, col = 5, row = 4)
-    simNow(n = 2, m = 5, k = 3, bufferRamCount = 12, channel = 7, hout = 9, iw = 2, wh = 2, col = 5, row = 4, F = 10, width = 8)
+    simNow(n = 2, m = 5, k = 3, bufferRamCount = 12, channel = 7, hout = 9, iw = 2, ww = 2, col = 5, row = 4, F = 10, width = 8)
 
-    def simNow(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, F: Int, iw: Int, wh: Int, col: Int, row: Int) = {
+    def simNow(n: Int, m: Int, hout: Int, width: Int, bufferRamCount: Int, channel: Int, k: Int, F: Int, iw: Int, ww: Int, col: Int, row: Int) = {
         SimConfig.withWave.withConfig(SpinalConfig(
             defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH),
             defaultClockDomainFrequency = FixedFrequency(100 MHz)
             )).compile {
-            val dut = new ctrlTestTop(n, m, hout, width, bufferRamCount, channel, k, F, iw, wh, col, row)
+            val dut = new lineBufferCtrl(n, m, hout, width, bufferRamCount, channel, k, F, iw, ww, col, row)
             dut.writers.foreach(_.toControl.dataToRam simPublic())
             dut.BufferRam.counter.value simPublic()
             dut.Ctrl.readHead.simPublic()
@@ -221,7 +217,7 @@ object ctrlTestTopSim extends App {
                         val bufferRamCounter = dut.BufferRam.counter.value.toInt
                         val address          = dut.Ctrl.writerAddress.toInt
                         val writerOutData    = dut.writers.map(_.toControl.dataToRam).map(dut.longBitsCov(_))
-                        println(s"---------output ${dut.wh} lines-----------------------")
+                        println(s"---------output ${dut.ww} lines-----------------------")
                         println("address: " + address)
                         print2D(writerOutData)
                         for (i <- 0 until dut.n) {
@@ -272,7 +268,7 @@ object ctrlTestTopSim extends App {
 
     }
 
-    implicit class ctrlSIm(dut: ctrlTestTop) {
+    implicit class ctrlSIm(dut: lineBufferCtrl) {
 
         import dut.{dataIn, peOut, clockDomain}
         import lineBuffer._
@@ -298,19 +294,19 @@ object ctrlTestTopSim extends App {
                     for (c <- 0 until dut.col) {
                         nRows.zip(dut.dataIn).foreach { case (rowMatrix, ports) =>
                             ports.payload.zipWithIndex.foreach { case (sig, sigIndex) =>
-                                sig #= rowMatrix(r * dut.wh + sigIndex / dut.wh)(c * dut.iw + (sigIndex % dut.iw))
+                                sig #= rowMatrix(r * dut.ww + sigIndex / dut.ww)(c * dut.iw + (sigIndex % dut.iw))
                             }
                         }
                         clockDomain.waitSampling()
                     }
                     dut.dataIn.foreach(_.valid #= false)
-                    for (w <- 0 until dut.wh) {
+                    for (w <- 0 until dut.ww) {
                         clockDomain.waitSampling()
                         val datatoRam = dut.writers.map(_.toControl.dataToRam.toBigInt.toString(2)).map { d => prefixZero(d, dut.width * dut.hout) }.map(_.grouped(dut.width).map(BigInt(_, 2))).map(_.toArray)
                         //                        print2D(datatoRam)
                         if (lineOuted < dut.channel) {
                             for (i <- 0 until dut.n) {
-                                bufferRamData(counter * dut.n + i)(r * dut.wh + w) = datatoRam(i).reverse
+                                bufferRamData(counter * dut.n + i)(r * dut.ww + w) = datatoRam(i).reverse
                             }
                         }
                         lineOuted += 1

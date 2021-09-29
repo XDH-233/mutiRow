@@ -41,16 +41,16 @@ object rowBufferWriterPoolingPorts {
     }
 }
 
-case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int, poolingSize: Int) extends Component {
+case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Ww: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int, poolingSize: Int) extends Component {
 
     import Compare._
 
     val toControl = master(rowBufferWriterPoolingPorts(this))
-    val dataIn    = slave Stream (Vec(UInt(dataWidth bits), Iw * Wh))
+    val dataIn    = slave Stream (Vec(UInt(dataWidth bits), Iw * Ww))
 
-    val blockRegs            = Array.fill(Wh)(Vec(Reg(UInt(dataWidth bits)) init (0), Hout))
+    val blockRegs            = Array.fill(Ww)(Vec(Reg(UInt(dataWidth bits)) init (0), Hout))
     val colCounter           = Reg(UInt(log2Up(colCount) + 1 bits)) init (0)
-    val rowCounter           = Reg(UInt(log2Up(Wh) + 1 bits)) init (0)
+    val rowCounter           = Reg(UInt(log2Up(Ww) + 1 bits)) init (0)
     val lineBufferRowCounter = Reg(UInt(log2Up(channel) bits)) init (0)
     toControl.dataOut.foreach(_ := 0)
     dataIn.ready := False
@@ -77,7 +77,7 @@ case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int
         blocksReceiving.whenIsActive {
             dataIn.ready := True
             when(dataIn.valid) {
-                for (w <- 0 until Wh) {
+                for (w <- 0 until Ww) {
                     for (i <- 0 until Iw) {
                         switch(colCounter) {
                             for (c <- 0 until colCount) {
@@ -106,7 +106,7 @@ case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int
             toControl.address := lineBufferRowCounter
 
             switch(rowCounter) {
-                for (r <- 0 until Wh) {
+                for (r <- 0 until Ww) {
                     is(r) {
                         val c = Vec(Vec(blockRegs(r).grouped(poolingSize).map(Vec(_))).map(compare(_)))
                         toControl.dataOut.zip(c).foreach { case (o, i) => o := i }
@@ -118,7 +118,7 @@ case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int
                 lineBufferRowCounter.clearAll()
                 rowCounter.clearAll()
                 blockRegs.foreach(_.foreach(_.clearAll()))
-            } elsewhen (rowCounter === Wh - 1) {
+            } elsewhen (rowCounter === Ww - 1) {
                 goto(blocksReceiving)
                 rowCounter.clearAll()
                 lineBufferRowCounter := lineBufferRowCounter + 1
@@ -137,7 +137,7 @@ case class rowBufferWriterPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int
     }
 }
 
-case class writersPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int, poolingSize: Int) extends Component {
+case class writersPooling(dataWidth: Int, Iw: Int, Ww: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int, poolingSize: Int) extends Component {
 
     import Compare._
 
@@ -145,8 +145,8 @@ case class writersPooling(dataWidth: Int, Iw: Int, Wh: Int, channel: Int, Hout: 
     val transferEnd   = out Bool()
     val address       = out UInt (log2Up(channel) bits)
     val wrEn          = out Bool()
-    val dataIn        = Array.fill(poolingSize)(slave Stream (Vec(UInt(dataWidth bits), Iw * Wh)))
-    val writers       = Array.fill(poolingSize)(rowBufferWriterPooling(dataWidth, Iw, Wh, channel, Hout, colCount, rowCount, poolingSize))
+    val dataIn        = Array.fill(poolingSize)(slave Stream (Vec(UInt(dataWidth bits), Iw * Ww)))
+    val writers       = Array.fill(poolingSize)(rowBufferWriterPooling(dataWidth, Iw, Ww, channel, Hout, colCount, rowCount, poolingSize))
     val dataOut       = out Vec(UInt(dataWidth bits), writers(0).toControl.dataOut.length)
     dataIn.zip(writers).foreach { case (i, w) => i <> w.dataIn }
     writers.foreach(_.toControl.transferStart := transferStart)
@@ -166,11 +166,16 @@ object writersPoolingSim extends App{
         defaultClockDomainFrequency = FixedFrequency(100 MHz)
     )).compile(new writersPooling(8, 2,2, 7, 9, 5,4, 2)).doSim { dut =>
         import dut._
-        clockDomain.forkStimulus(10000)
+        clockDomain.forkStimulus(10)
         dut.init
-        val rowMatrixArr = Array.fill(poolingSize)(getRowMatrix(8, 10, 7, 9, 8))
-        rowMatrixArr.foreach(print2D(_))
-        dut.writeRows(rowMatrixArr)
+        for(s <- 0 until 5){
+            println(s"---------${s}-------------")
+            val rowMatrixArr = Array.fill(poolingSize)(getRowMatrix(8, 10, 7, 9, 8))
+            rowMatrixArr.foreach(print2D(_))
+            dut.writeRows(rowMatrixArr)
+        }
+        clockDomain.waitSampling(5)
+
     }
     implicit class writerPoolingSimMeth(dut: writersPooling){
         import dut._
@@ -186,16 +191,29 @@ object writersPoolingSim extends App{
             clockDomain.waitSampling()
             transferStart #= false
             dataIn.foreach(_.valid#=true)
+            var lineOuted = 0
             for(r <- 0 until rowCount){
                 for(c <- 0 until colCount){
                     dataIn.zipWithIndex.foreach{case(s, i)=>
                         s.payload.zipWithIndex.foreach{case(sig, j)=>
-                            sig #= rowMatrixArr(i)(r * Wh + j / Iw)(c * Iw + j % Iw)
+                            sig #= rowMatrixArr(i)(r * Ww + j / Iw)(c * Iw + j % Iw)
                         }
                     }
                     clockDomain.waitSampling()
                 }
-                clockDomain.waitSampling(Wh)
+                for(w <- 0 until Ww){
+                    clockDomain.waitSampling()
+                    if(lineOuted < channel){
+                        val dataOutVal = dataOut.map(_.toBigInt).toArray
+                        println("out: " + dataOutVal.mkString(" "))
+                        dataOutVal.zipWithIndex.foreach{case(v, i)=>
+                            val c = rowMatrixArr.map(_(r * Ww + w).grouped(poolingSize).toArray).map(_(i)).flatten
+                            assert(v == c.max)
+                            println(c.mkString(" "))
+                        }
+                    }
+                    lineOuted += 1
+                }
             }
         }
     }
@@ -237,14 +255,13 @@ object rowBufferWriterPoolingSim extends App {
             for (c <- 0 until rowCount) {
                 dataIn.valid #= true
                 for (t <- 0 until colCount) {
-                    dataIn.payload.zipWithIndex.foreach { case (port, index) => port #= buffer(c * Wh + index / Iw)(t * Iw + index % Iw) }
+                    dataIn.payload.zipWithIndex.foreach { case (port, index) => port #= buffer(c * Ww + index / Iw)(t * Iw + index % Iw) }
                     clockDomain.waitSampling()
                     printRegs
                 }
                 dataIn.valid #= false
-                //                println("***************************************Out***************************************")
                 clockDomain.waitSampling()
-                for (i <- 0 until Wh) {
+                for (i <- 0 until Ww) {
                     clockDomain.waitSampling()
                 }
                 clockDomain.waitSampling(3)

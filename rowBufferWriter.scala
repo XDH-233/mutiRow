@@ -28,13 +28,13 @@ object rowBufferWriterPorts{
     }
 }
 
-case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int) extends Component {
-    val dataIn    = slave Stream (Vec(Bits(width bits), Iw * Wh))
+case class rowBufferWriter(width: Int, Iw: Int, Ww: Int, channel: Int, Hout: Int, colCount: Int, rowCount: Int) extends Component {
+    val dataIn    = slave Stream (Vec(Bits(width bits), Iw * Ww))
     val toControl = master(rowBufferWriterPorts(this))
 
-    val blockRegs            = Array.fill(Wh)(Vec(Reg(Bits(width bits)) init (0), Hout))
+    val blockRegs            = Array.fill(Ww)(Vec(Reg(Bits(width bits)) init (0), Hout))
     val colCounter           = Reg(UInt(log2Up(colCount) + 1 bits)) init (0)
-    val rowCounter           = Reg(UInt(log2Up(Wh) + 1 bits)) init (0)
+    val rowCounter           = Reg(UInt(log2Up(Ww) + 1 bits)) init (0)
     val lineBufferRowCounter = Reg(UInt(log2Up(channel) bits)) init (0)
     toControl.dataToRam := 0
     dataIn.ready := False
@@ -61,7 +61,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
         blocksReceiving.whenIsActive {
             dataIn.ready := True
             when(dataIn.valid) {
-                for (w <- 0 until Wh) {
+                for (w <- 0 until Ww) {
                     for (i <- 0 until Iw) {
                         switch(colCounter) {
                             for (c <- 0 until colCount) {
@@ -90,7 +90,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
             toControl.address := lineBufferRowCounter
 
             switch(rowCounter) {
-                for (r <- 0 until Wh) {
+                for (r <- 0 until Ww) {
                     is(r) {
                         blockRegs(r).zipWithIndex.foreach { case (reg, index) =>
                             toControl.dataToRam((index + 1) * width - 1 downto index * width) := reg
@@ -103,7 +103,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
                 lineBufferRowCounter.clearAll()
                 rowCounter.clearAll()
                 blockRegs.foreach(_.foreach(_.clearAll()))
-            } elsewhen (rowCounter === Wh - 1) {
+            } elsewhen (rowCounter === Ww - 1) {
                 goto(blocksReceiving)
                 rowCounter.clearAll()
                 lineBufferRowCounter := lineBufferRowCounter + 1
@@ -127,7 +127,7 @@ case class rowBufferWriter(width: Int, Iw: Int, Wh: Int, channel: Int, Hout: Int
 object lineBuffer {
     def getRowMatrix(rowNumOfBlocks: Int, colNumOfBlocks: Int, channel: Int, Hout: Int, width: Int) = List.tabulate(rowNumOfBlocks, colNumOfBlocks)((i, j) => if (i > channel - 1 || j > Hout - 1) BigInt(0) else BigInt(width, scala.util.Random)).map(_.toArray).toArray
 
-    def getRows(dut: ctrlTestTop, num: Int)= Array.fill(num)(getRowMatrix(dut.row * dut.wh, dut.col * dut.iw, dut.channel, dut.hout, dut.width))
+    def getRows(dut: lineBufferCtrl, num: Int)= Array.fill(num)(getRowMatrix(dut.row * dut.ww, dut.col * dut.iw, dut.channel, dut.hout, dut.width))
 
     def print2D(buffer: Array[Array[BigInt]]) = {
         buffer.foreach { seq =>
@@ -157,14 +157,14 @@ object rowBufferWriterSim extends App {
             for (c <- 0 until dut.rowCount) {
                 dut.dataIn.valid #= true
                 for (t <- 0 until dut.colCount) {
-                    dut.dataIn.payload.zipWithIndex.foreach { case (port, index) => port #= buffer(c * dut.Wh + index / dut.Iw)(t * dut.Iw + index % dut.Iw) }
+                    dut.dataIn.payload.zipWithIndex.foreach { case (port, index) => port #= buffer(c * dut.Ww + index / dut.Iw)(t * dut.Iw + index % dut.Iw) }
                     dut.clockDomain.waitSampling()
                     printRegs
                 }
                 dut.dataIn.valid #= false
                 println("***************************************Out***************************************")
-                for (o <- 0 until dut.Wh) {
-                    if (c * dut.Wh + o < dut.channel) {
+                for (o <- 0 until dut.Ww) {
+                    if (c * dut.Ww + o < dut.channel) {
                         dut.clockDomain.waitSampling()
                         if (o == 0) printRegs
                         var resString = dut.toControl.dataToRam.toBigInt.toString(2)
@@ -196,7 +196,7 @@ object rowBufferWriterSim extends App {
             defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH),
             defaultClockDomainFrequency = FixedFrequency(100 MHz)
             )).compile {
-            val dut = rowBufferWriter(Hout = h, channel = c, width = Width, Iw = I, Wh = W, colCount = col, rowCount = row)
+            val dut = rowBufferWriter(Hout = h, channel = c, width = Width, Iw = I, Ww = W, colCount = col, rowCount = row)
             dut.blockRegs.foreach(_.simPublic())
             dut
         }.doSim { dut =>
